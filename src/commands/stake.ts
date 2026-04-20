@@ -4,6 +4,7 @@ import { initSigner, getWalletAddress, signTransaction, stopSigner } from '../li
 import { outputResult, outputAction, createSpinner, confirmOnChain } from '../lib/output.js';
 import { handleError } from '../lib/error.js';
 import { getExplorerTxUrl, validateNetworkOption, type ResourceType } from '../lib/types.js';
+import { runPrecheck, measureTxBytes, checkStake } from '../lib/precheck.js';
 
 export function registerStakeCommand(program: Command): void {
   program
@@ -20,9 +21,16 @@ export function registerStakeCommand(program: Command): void {
         const amountSun = trxToSun(cmdOpts.amount);
 
         const signer = await initSigner(opts.port);
-        const { address, network } = await getWalletAddress(signer, cmdOpts.network, true);
+        const { address, network } = await getWalletAddress(signer, cmdOpts.network);
         const tronWeb = getTronWeb(network, opts.apiKey);
         const broadcast = !opts.localBroadcast;
+
+        const spinner = createSpinner('Building transaction...');
+        const tx = await tronWeb.transactionBuilder.freezeBalanceV2(amountSun, resource, address);
+        spinner.succeed('Transaction built');
+
+        await runPrecheck('Checking balance...', () =>
+          checkStake(tronWeb, address, amountSun, measureTxBytes(tx)));
 
         outputAction({
           Action: 'Stake TRX',
@@ -33,9 +41,6 @@ export function registerStakeCommand(program: Command): void {
           Broadcast: broadcast ? 'Signer' : 'Local',
         });
 
-        const spinner = createSpinner('Building transaction...');
-        const tx = await tronWeb.transactionBuilder.freezeBalanceV2(amountSun, resource, address);
-        spinner.succeed('Transaction built');
         const result = await signTransaction(signer, tx, network, broadcast);
 
         const txId = broadcast ? result.txId! : await broadcastTx(tronWeb, result.signedTransaction);

@@ -4,6 +4,7 @@ import { initSigner, getWalletAddress, signTransaction, stopSigner } from '../li
 import { outputResult, outputAction, createSpinner, confirmOnChain } from '../lib/output.js';
 import { handleError } from '../lib/error.js';
 import { getExplorerTxUrl, validateNetworkOption } from '../lib/types.js';
+import { runPrecheck, measureTxBytes, checkVote } from '../lib/precheck.js';
 
 export function registerVoteCommand(program: Command): void {
   program
@@ -17,9 +18,16 @@ export function registerVoteCommand(program: Command): void {
         validateNetworkOption(cmdOpts.network);
         const voteMap = parseVotes(cmdOpts.votes);
         const signer = await initSigner(opts.port);
-        const { address, network } = await getWalletAddress(signer, cmdOpts.network, true);
+        const { address, network } = await getWalletAddress(signer, cmdOpts.network);
         const tronWeb = getTronWeb(network, opts.apiKey);
         const broadcast = !opts.localBroadcast;
+
+        const spinner = createSpinner('Building transaction...');
+        const tx = await tronWeb.transactionBuilder.vote(voteMap, address);
+        spinner.succeed('Transaction built');
+
+        await runPrecheck('Checking Tron Power and SR addresses...', () =>
+          checkVote(tronWeb, address, voteMap, measureTxBytes(tx)));
 
         const voteDisplay = Object.entries(voteMap)
           .map(([addr, count]) => `${addr}: ${count}`)
@@ -33,9 +41,6 @@ export function registerVoteCommand(program: Command): void {
           Broadcast: broadcast ? 'Signer' : 'Local',
         });
 
-        const spinner = createSpinner('Building transaction...');
-        const tx = await tronWeb.transactionBuilder.vote(voteMap, address);
-        spinner.succeed('Transaction built');
         const result = await signTransaction(signer, tx, network, broadcast);
 
         const txId = broadcast ? result.txId! : await broadcastTx(tronWeb, result.signedTransaction);

@@ -8,6 +8,15 @@ import type { TronNetwork } from './types.js';
 import { outputInfo, createSpinner } from './output.js';
 import { tryConnectIPC, type IPCClient } from './ipc.js';
 
+export type BroadcastStatus = 'success' | 'pending' | 'failed';
+
+export interface SignTransactionResult {
+  signedTransaction?: Record<string, unknown>;
+  txId?: string;
+  status?: BroadcastStatus;
+  error?: string;
+}
+
 let signerInstance: TronSigner | null = null;
 let ipcClient: IPCClient | null = null;
 let signerAbort: AbortController | null = null;
@@ -121,14 +130,19 @@ export async function getWalletAddress(
   network?: TronNetwork,
   forceConnect = false,
 ): Promise<{ address: string; network: TronNetwork }> {
-  // Network is always authoritative from the caller; default to mainnet if not specified.
-  // Cache only supplies the address — SDK/browser handles network switching at sign time.
+  // `forceConnect` bypasses the IPC cache and prompts TronLink re-approval.
+  // Use it for commands where the cached wallet would be wrong: `connect` and
+  // `network` are explicit wallet-interaction commands, and `balance`/`resource`
+  // display terminal state with no sign-time WALLET_CHANGED fallback. Transaction
+  // commands omit it because the signer rejects stale-cache attempts at sign time.
   const targetNetwork: TronNetwork = network || 'mainnet';
   let address: string;
   let walletNetwork: TronNetwork = targetNetwork;
 
   if (ipcClient) {
-    const cached = await ipcClient.call('getConnectedWallet', {}) as { address: string; network: string } | null;
+    const cached = forceConnect
+      ? null
+      : await ipcClient.call('getConnectedWallet', {}) as { address: string; network: string } | null;
     if (cached) {
       address = cached.address;
       outputInfo(`Wallet: ${address} (${walletNetwork})`);
@@ -166,55 +180,38 @@ export async function getWalletAddress(
   return { address, network: walletNetwork };
 }
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
 export async function signTransaction(
   signer: TronSigner,
   transaction: unknown,
   network?: TronNetwork,
   broadcast = true,
-): Promise<{ signedTransaction?: any; txId?: string }> {
-  if (ipcClient) {
-    const approvalSpinner = createSpinner('Awaiting TronLink approval (check browser tab)...');
-    try {
-      const result = await withTimeout(
+): Promise<SignTransactionResult> {
+  const approvalSpinner = createSpinner('Awaiting TronLink approval (check browser tab)...');
+
+  // Strategy:
+  // - Browser SDK polls on-chain and shows result in UI; CLI also polls independently.
+  // - onBroadcasted fires the instant the browser reports a successful broadcast
+  //   (via POST /api/broadcasted/:id), before the signTransaction promise resolves.
+  //   If the promise later rejects (tab closed, WALLET_CHANGED, heartbeat timeout),
+  //   we still have txId + signedTransaction and can treat the tx as broadcasted,
+  //   so the caller keeps the on-chain poll path and the tx isn't lost.
+  try {
+    let result: SignTransactionResult;
+    if (ipcClient) {
+      // daemon applies the same recovery internally and returns a normal result
+      result = await withTimeout(
         ipcClient.call('signTransaction', {
           transaction: transaction as Record<string, unknown>,
           network,
           broadcast,
-        }) as Promise<{ signedTransaction?: any; txId?: string }>,
+        }) as Promise<SignTransactionResult>,
         getTimeout(),
         'Transaction signing timed out. Please run the command again',
       );
-      if (broadcast && !result.txId) {
-        approvalSpinner.fail('Approval failed');
-        throw new Error('Signer reported broadcast but returned no transaction ID — the transaction may have been rejected by the network');
-      }
-      approvalSpinner.succeed(broadcast ? `Broadcasted (TxID: ${result.txId})` : 'Signed');
-      return result;
-    } catch (err) {
-      const reason = walletChangedReason(err);
-      if (reason) {
-        approvalSpinner.fail('Cancelled: wallet changed in TronLink');
-        throw walletChangedError(reason);
-      }
-      approvalSpinner.fail('Approval failed');
-      throw err;
+    } else {
+      result = await signInProcess(signer, transaction, network, broadcast);
     }
-  }
 
-  const approvalSpinner = createSpinner('Awaiting TronLink approval (check browser tab)...');
-  const controller = createSignerAbort();
-  try {
-    const result = await withTimeout(
-      signer.signTransaction(
-        transaction as Record<string, unknown>,
-        network,
-        broadcast,
-        { signal: controller.signal },
-      ),
-      getTimeout(),
-      'Transaction signing timed out. Please run the command again',
-    );
     if (broadcast && !result.txId) {
       approvalSpinner.fail('Approval failed');
       throw new Error('Signer reported broadcast but returned no transaction ID — the transaction may have been rejected by the network');
@@ -228,6 +225,43 @@ export async function signTransaction(
       throw walletChangedError(reason);
     }
     approvalSpinner.fail('Approval failed');
+    throw err;
+  }
+}
+
+async function signInProcess(
+  signer: TronSigner,
+  transaction: unknown,
+  network: TronNetwork | undefined,
+  broadcast: boolean,
+): Promise<SignTransactionResult> {
+  const controller = createSignerAbort();
+  let captured: { txId: string; signedTransaction: Record<string, unknown> } | null = null;
+
+  try {
+    return await withTimeout(
+      signer.signTransaction(
+        transaction as Record<string, unknown>,
+        network,
+        broadcast,
+        {
+          signal: controller.signal,
+          onBroadcasted: (info) => { captured = info; },
+        },
+      ),
+      getTimeout(),
+      'Transaction signing timed out. Please run the command again',
+    );
+  } catch (err) {
+    if (broadcast && captured) {
+      // Broadcast already succeeded — don't lose the txId just because the browser
+      // side couldn't deliver the final response. CLI will poll on-chain result.
+      return {
+        signedTransaction: (captured as { signedTransaction: Record<string, unknown> }).signedTransaction,
+        txId: (captured as { txId: string }).txId,
+        status: 'pending',
+      };
+    }
     throw err;
   }
 }

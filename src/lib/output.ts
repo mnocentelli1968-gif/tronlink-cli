@@ -29,6 +29,11 @@ export function outputInfo(message: string): void {
   console.log(chalk.blue(message));
 }
 
+export function outputWarning(message: string): void {
+  if (isJsonMode()) return;
+  console.log(chalk.yellow(`Warning: ${message}`));
+}
+
 export function outputAction(details: Record<string, string>): void {
   if (isJsonMode()) return;
   console.log(chalk.bold.yellow('\nTransaction Preview'));

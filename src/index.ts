@@ -1,4 +1,5 @@
 import { Command, InvalidArgumentError } from 'commander';
+import pkg from '../package.json' with { type: 'json' };
 import { setJsonMode, isJsonMode } from './lib/error.js';
 import { registerTransferCommand } from './commands/transfer.js';
 import { registerStakeCommand } from './commands/stake.js';
@@ -35,7 +36,7 @@ export function createProgram(): Command {
   program
     .name('tronlink')
     .description('CLI for TRON blockchain operations via TronLink wallet')
-    .version('0.1.0')
+    .version(pkg.version)
     .option('--local-broadcast', 'Broadcast via CLI local TronWeb instead of signer TronWeb')
     .option('--json', 'Output as JSON')
     .option('--port <n>', 'TronLink Signer HTTP port', (val: string) => {

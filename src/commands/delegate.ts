@@ -4,6 +4,7 @@ import { initSigner, getWalletAddress, signTransaction, stopSigner } from '../li
 import { outputResult, outputAction, createSpinner, confirmOnChain } from '../lib/output.js';
 import { handleError } from '../lib/error.js';
 import { getExplorerTxUrl, validateNetworkOption, type ResourceType } from '../lib/types.js';
+import { runPrecheck, measureTxBytes, checkDelegate } from '../lib/precheck.js';
 
 export function registerDelegateCommand(program: Command): void {
   program
@@ -29,20 +30,9 @@ export function registerDelegateCommand(program: Command): void {
         const lockPeriod = Math.round(lockDays * 28800); // 1 day = 28800 blocks (3s per block)
 
         const signer = await initSigner(opts.port);
-        const { address, network } = await getWalletAddress(signer, cmdOpts.network, true);
+        const { address, network } = await getWalletAddress(signer, cmdOpts.network);
         const tronWeb = getTronWeb(network, opts.apiKey);
         const broadcast = !opts.localBroadcast;
-
-        outputAction({
-          Action: 'Delegate Resource',
-          Network: network,
-          From: address,
-          To: cmdOpts.toAddress,
-          Amount: `${cmdOpts.amount} TRX`,
-          Resource: resource,
-          LockPeriod: lock ? `${lockDays} days (${lockPeriod} blocks)` : 'None',
-          Broadcast: broadcast ? 'Signer' : 'Local',
-        });
 
         const spinner = createSpinner('Building transaction...');
         const [tx, accountResource] = await Promise.all([
@@ -73,6 +63,21 @@ export function registerDelegateCommand(program: Command): void {
           : { estimatedBandwidth: estimatedResource };
 
         spinner.succeed(`Transaction built (estimated ${resource.toLowerCase()}: ${estimatedResource.toLocaleString()})`);
+
+        await runPrecheck('Checking delegatable amount...', () =>
+          checkDelegate(tronWeb, address, resource, amountSun, measureTxBytes(tx)));
+
+        outputAction({
+          Action: 'Delegate Resource',
+          Network: network,
+          From: address,
+          To: cmdOpts.toAddress,
+          Amount: `${cmdOpts.amount} TRX`,
+          Resource: resource,
+          LockPeriod: lock ? `${lockDays} days (${lockPeriod} blocks)` : 'None',
+          Broadcast: broadcast ? 'Signer' : 'Local',
+        });
+
         const result = await signTransaction(signer, tx, network, broadcast);
 
         const txId = broadcast ? result.txId! : await broadcastTx(tronWeb, result.signedTransaction);

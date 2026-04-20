@@ -15,7 +15,7 @@ export function registerWithdrawCommand(program: Command): void {
       try {
         validateNetworkOption(cmdOpts.network);
         const signer = await initSigner(opts.port);
-        const { address, network } = await getWalletAddress(signer, cmdOpts.network, true);
+        const { address, network } = await getWalletAddress(signer, cmdOpts.network);
         const tronWeb = getTronWeb(network, opts.apiKey);
         const broadcast = !opts.localBroadcast;
 

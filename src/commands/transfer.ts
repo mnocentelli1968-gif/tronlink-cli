@@ -4,6 +4,7 @@ import { initSigner, getWalletAddress, signTransaction, stopSigner } from '../li
 import { outputResult, outputAction, createSpinner, confirmOnChain } from '../lib/output.js';
 import { handleError } from '../lib/error.js';
 import { getExplorerTxUrl, validateNetworkOption, type TronNetwork } from '../lib/types.js';
+import { runPrecheck, measureTxBytes, checkTransferTrx, checkTransferTrc10, checkTransferTrc20, checkTransferTrc721 } from '../lib/precheck.js';
 
 type TransferType = 'trx' | 'trc10' | 'trc20' | 'trc721';
 
@@ -97,7 +98,7 @@ export function registerTransferCommand(program: Command): void {
         const feeLimitSun = cmdOpts.feeLimit ? trxToSun(cmdOpts.feeLimit, 'fee-limit') : 100_000_000;
 
         const signer = await initSigner(opts.port);
-        const { address, network } = await getWalletAddress(signer, cmdOpts.network, true);
+        const { address, network } = await getWalletAddress(signer, cmdOpts.network);
         const tronWeb = getTronWeb(network, opts.apiKey);
         const broadcast = !opts.localBroadcast;
 
@@ -144,6 +145,13 @@ async function transferTrx(tronWeb: any, signer: any, ctx: {
   validatePositiveNumber(ctx.amount, 'amount');
   const amountSun = trxToSun(ctx.amount);
 
+  const spinner = createSpinner('Building transaction...');
+  const tx = await tronWeb.transactionBuilder.sendTrx(ctx.to, amountSun, ctx.address);
+  spinner.succeed('Transaction built');
+
+  await runPrecheck('Checking balance...', () =>
+    checkTransferTrx(tronWeb, ctx.address, ctx.to, amountSun, measureTxBytes(tx)));
+
   outputAction({
     Action: 'Transfer TRX',
     Network: ctx.network,
@@ -153,9 +161,6 @@ async function transferTrx(tronWeb: any, signer: any, ctx: {
     Broadcast: ctx.broadcast ? 'Signer' : 'Local',
   });
 
-  const spinner = createSpinner('Building transaction...');
-  const tx = await tronWeb.transactionBuilder.sendTrx(ctx.to, amountSun, ctx.address);
-  spinner.succeed('Transaction built');
   const result = await signTransaction(signer, tx, ctx.network, ctx.broadcast);
 
   const txId = ctx.broadcast ? result.txId! : await broadcastTx(tronWeb, result.signedTransaction);
@@ -194,6 +199,13 @@ async function transferTrc10(tronWeb: any, signer: any, ctx: {
     throw new Error(`TRC10 amount too large: "${ctx.amount}"`);
   }
 
+  const spinner2 = createSpinner('Building transaction...');
+  const tx = await tronWeb.transactionBuilder.sendToken(ctx.to, trc10Amount, ctx.tokenId, ctx.address);
+  spinner2.succeed('Transaction built');
+
+  await runPrecheck('Checking balance...', () =>
+    checkTransferTrc10(tronWeb, ctx.address, ctx.tokenId, rawAmount, measureTxBytes(tx)));
+
   outputAction({
     Action: 'Transfer TRC10',
     Network: ctx.network,
@@ -205,9 +217,6 @@ async function transferTrc10(tronWeb: any, signer: any, ctx: {
     Broadcast: ctx.broadcast ? 'Signer' : 'Local',
   });
 
-  const spinner2 = createSpinner('Building transaction...');
-  const tx = await tronWeb.transactionBuilder.sendToken(ctx.to, trc10Amount, ctx.tokenId, ctx.address);
-  spinner2.succeed('Transaction built');
   const result = await signTransaction(signer, tx, ctx.network, ctx.broadcast);
 
   const txId = ctx.broadcast ? result.txId! : await broadcastTx(tronWeb, result.signedTransaction);
@@ -242,18 +251,6 @@ async function transferTrc20(tronWeb: any, signer: any, ctx: {
 
   const rawAmount = parseAmount(ctx.amount, decimals);
 
-  outputAction({
-    Action: 'Transfer TRC20',
-    Network: ctx.network,
-    From: ctx.address,
-    To: ctx.to,
-    Amount: ctx.amount,
-    Contract: ctx.contract,
-    Decimals: String(decimals),
-    FeeLimit: `${ctx.feeLimitSun / 1_000_000} TRX`,
-    Broadcast: ctx.broadcast ? 'Signer' : 'Local',
-  });
-
   const spinner2 = createSpinner('Building transaction...');
   const { transaction } = await tronWeb.transactionBuilder.triggerSmartContract(
     ctx.contract,
@@ -266,6 +263,22 @@ async function transferTrc20(tronWeb: any, signer: any, ctx: {
     ctx.address,
   );
   spinner2.succeed('Transaction built');
+
+  await runPrecheck('Checking balance and energy...', () =>
+    checkTransferTrc20(tronWeb, ctx.contract, ctx.address, ctx.to, rawAmount, ctx.feeLimitSun, measureTxBytes(transaction)));
+
+  outputAction({
+    Action: 'Transfer TRC20',
+    Network: ctx.network,
+    From: ctx.address,
+    To: ctx.to,
+    Amount: ctx.amount,
+    Contract: ctx.contract,
+    Decimals: String(decimals),
+    FeeLimit: `${ctx.feeLimitSun / 1_000_000} TRX`,
+    Broadcast: ctx.broadcast ? 'Signer' : 'Local',
+  });
+
   const result = await signTransaction(signer, transaction, ctx.network, ctx.broadcast);
 
   const txId = ctx.broadcast ? result.txId! : await broadcastTx(tronWeb, result.signedTransaction);
@@ -283,17 +296,6 @@ async function transferTrc721(tronWeb: any, signer: any, ctx: {
   to: string; contract: string; tokenId: string;
   feeLimitSun: number;
 }) {
-  outputAction({
-    Action: 'Transfer TRC721 NFT',
-    Network: ctx.network,
-    From: ctx.address,
-    To: ctx.to,
-    Contract: ctx.contract,
-    TokenID: ctx.tokenId,
-    FeeLimit: `${ctx.feeLimitSun / 1_000_000} TRX`,
-    Broadcast: ctx.broadcast ? 'Signer' : 'Local',
-  });
-
   const spinner = createSpinner('Building transaction...');
   const { transaction } = await tronWeb.transactionBuilder.triggerSmartContract(
     ctx.contract,
@@ -307,6 +309,21 @@ async function transferTrc721(tronWeb: any, signer: any, ctx: {
     ctx.address,
   );
   spinner.succeed('Transaction built');
+
+  await runPrecheck('Checking NFT ownership and energy...', () =>
+    checkTransferTrc721(tronWeb, ctx.contract, ctx.address, ctx.to, ctx.tokenId, ctx.feeLimitSun, measureTxBytes(transaction)));
+
+  outputAction({
+    Action: 'Transfer TRC721 NFT',
+    Network: ctx.network,
+    From: ctx.address,
+    To: ctx.to,
+    Contract: ctx.contract,
+    TokenID: ctx.tokenId,
+    FeeLimit: `${ctx.feeLimitSun / 1_000_000} TRX`,
+    Broadcast: ctx.broadcast ? 'Signer' : 'Local',
+  });
+
   const result = await signTransaction(signer, transaction, ctx.network, ctx.broadcast);
 
   const txId = ctx.broadcast ? result.txId! : await broadcastTx(tronWeb, result.signedTransaction);

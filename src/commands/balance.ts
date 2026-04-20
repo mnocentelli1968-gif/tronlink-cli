@@ -181,16 +181,20 @@ function formatBalance(raw: bigint, decimals: number): string {
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 async function queryTrc20Balance(tronWeb: any, contract: string, address: string, decimals: number): Promise<string> {
-  const { constant_result } = await tronWeb.transactionBuilder.triggerConstantContract(
+  const res = await tronWeb.transactionBuilder.triggerConstantContract(
     contract,
     'balanceOf(address)',
     {},
     [{ type: 'address', value: address }],
     address,
   );
-  const hex = constant_result?.[0];
-  if (hex) {
-    return formatBalance(BigInt('0x' + hex), decimals);
+  if (!res?.result?.result) {
+    const msg = res?.result?.message
+      ? Buffer.from(res.result.message, 'hex').toString('utf8')
+      : 'TRC20 query failed';
+    throw new Error(msg);
   }
-  return '0';
+  const hex = res.constant_result?.[0];
+  if (!hex) throw new Error('TRC20 query returned empty result');
+  return formatBalance(BigInt('0x' + hex), decimals);
 }

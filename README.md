@@ -42,7 +42,7 @@ All option names are **case-insensitive** (e.g. `--toAddress`, `--TOADDRESS`, `-
 Read commands support two modes:
 
 - **With `--address`**: queries directly via TronGrid, no wallet connection needed. Defaults to mainnet if `--network` is omitted.
-- **Without `--address`**: connects wallet to get real-time address and network from TronLink.
+- **Without `--address`**: prompts TronLink approval to read the current wallet address (defaults to mainnet if `--network` is omitted).
 
 ```bash
 # Query all token balances
@@ -117,6 +117,10 @@ tronlink withdraw [--network nile]
 tronlink delegate --toAddress <to> --amount <amount> --resource <energy|bandwidth> [--lock-period <days>] [--network nile]
 
 # Reclaim delegated resources
+# Partial reclaim is allowed: if some delegations are past their lock period and
+# others are still locked, you can reclaim up to the unlocked total. The precheck
+# reports how much is unlocked and when the next batch unlocks if the request
+# exceeds the unlocked amount.
 tronlink reclaim --fromAddress <from> --amount <amount> --resource <energy|bandwidth> [--network nile]
 ```
 
@@ -237,7 +241,7 @@ TronLink CLI supports AI agent integration via `--json` output. All commands ret
 1. Always append `--json` to get machine-readable output
 2. Write operations (transfer, stake, vote, etc.) will open the browser for user signing — wait for the command to return (default timeout: 5 minutes)
 3. Read operations with `--address` don't need wallet connection, faster for lookups
-4. Use `--network` to specify network, otherwise defaults to wallet's current network (write) or mainnet (read with address)
+4. Use `--network` to specify network; when omitted, commands default to mainnet
 5. Cancelling a command (Ctrl+C) cancels only that transaction, not the signing session
 
 ### AI Command Reference

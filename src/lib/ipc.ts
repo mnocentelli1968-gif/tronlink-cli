@@ -16,12 +16,18 @@ interface ServeState {
 
 // ─── State file ───
 
-export function writeServeState(port: number): void {
+function ensureServeDir(): void {
   if (!fs.existsSync(SERVE_DIR)) {
-    fs.mkdirSync(SERVE_DIR, { recursive: true });
+    fs.mkdirSync(SERVE_DIR, { recursive: true, mode: 0o700 });
+  } else {
+    try { fs.chmodSync(SERVE_DIR, 0o700); } catch { /* ignore */ }
   }
+}
+
+export function writeServeState(port: number): void {
+  ensureServeDir();
   const state: ServeState = { pid: process.pid, port, startedAt: new Date().toISOString() };
-  fs.writeFileSync(SERVE_STATE_FILE, JSON.stringify(state, null, 2));
+  fs.writeFileSync(SERVE_STATE_FILE, JSON.stringify(state, null, 2), { mode: 0o600 });
 }
 
 export function readServeState(): ServeState | null {
@@ -35,46 +41,63 @@ export function readServeState(): ServeState | null {
 
 export function clearServeState(): void {
   try { fs.unlinkSync(SERVE_STATE_FILE); } catch { /* ignore */ }
-  try { fs.unlinkSync(SOCKET_PATH); } catch { /* ignore */ }
-  try { fs.unlinkSync(SERVE_LOCK_FILE); } catch { /* ignore */ }
 }
 
 /**
- * Acquire an exclusive lock to prevent concurrent serve starts.
- * Returns a release function, or null if lock is held by another process.
+ * Liveness probe: a real daemon is one whose socket accepts connections.
+ * PID checks are unreliable because the kernel reuses PIDs — a stale state
+ * file could name a PID that belongs to an unrelated process.
  */
-export function acquireServeLock(): (() => void) | null {
-  if (!fs.existsSync(SERVE_DIR)) {
-    fs.mkdirSync(SERVE_DIR, { recursive: true });
-  }
-  try {
-    const fd = fs.openSync(SERVE_LOCK_FILE, 'wx');
-    fs.writeSync(fd, String(process.pid));
-    fs.closeSync(fd);
-    return () => {
-      try { fs.unlinkSync(SERVE_LOCK_FILE); } catch { /* ignore */ }
+export function isDaemonAlive(timeoutMs = 500): Promise<boolean> {
+  return new Promise((resolve) => {
+    if (!fs.existsSync(SOCKET_PATH)) return resolve(false);
+    let settled = false;
+    const done = (ok: boolean) => {
+      if (settled) return;
+      settled = true;
+      conn.destroy();
+      resolve(ok);
     };
-  } catch {
-    // Lock file exists — check if the holder is still alive
+    const conn = net.createConnection(SOCKET_PATH, () => done(true));
+    conn.on('error', () => done(false));
+    setTimeout(() => done(false), timeoutMs);
+  });
+}
+
+const BOOT_LOCK_STALE_MS = 30_000;
+
+/**
+ * Short-lived lock that guards only the startup sequence (unlink residual
+ * socket + listen). Release it as soon as listen succeeds — do NOT hold it for
+ * the daemon's lifetime. Liveness is determined by socket connectivity, not
+ * by this lock.
+ *
+ * Stale detection is mtime-based. No PID involved: a 30s-old lock is assumed
+ * abandoned (startup should take well under a second).
+ */
+export function acquireBootLock(): (() => void) | null {
+  ensureServeDir();
+  const tryCreate = (): (() => void) | null => {
     try {
-      const pid = parseInt(fs.readFileSync(SERVE_LOCK_FILE, 'utf-8'), 10);
-      process.kill(pid, 0); // throws if dead
-      return null; // another process holds the lock
+      const fd = fs.openSync(SERVE_LOCK_FILE, 'wx');
+      fs.closeSync(fd);
+      return () => { try { fs.unlinkSync(SERVE_LOCK_FILE); } catch { /* ignore */ } };
     } catch {
-      // Stale lock — remove and retry
-      try { fs.unlinkSync(SERVE_LOCK_FILE); } catch { /* ignore */ }
-      try {
-        const fd = fs.openSync(SERVE_LOCK_FILE, 'wx');
-        fs.writeSync(fd, String(process.pid));
-        fs.closeSync(fd);
-        return () => {
-          try { fs.unlinkSync(SERVE_LOCK_FILE); } catch { /* ignore */ }
-        };
-      } catch {
-        return null;
-      }
+      return null;
     }
-  }
+  };
+
+  const first = tryCreate();
+  if (first) return first;
+
+  try {
+    const stat = fs.statSync(SERVE_LOCK_FILE);
+    if (Date.now() - stat.mtimeMs > BOOT_LOCK_STALE_MS) {
+      try { fs.unlinkSync(SERVE_LOCK_FILE); } catch { /* ignore */ }
+      return tryCreate();
+    }
+  } catch { /* ignore */ }
+  return null;
 }
 
 // ─── IPC Server (used by `tronlink serve`) ───
@@ -85,7 +108,7 @@ export type RequestHandler = (
   signal: AbortSignal,
 ) => Promise<unknown>;
 
-export function startIPCServer(handler: RequestHandler): net.Server {
+export function startIPCServer(handler: RequestHandler): Promise<net.Server> {
   try { fs.unlinkSync(SOCKET_PATH); } catch { /* ignore */ }
 
   const server = net.createServer((conn) => {
@@ -115,8 +138,14 @@ export function startIPCServer(handler: RequestHandler): net.Server {
     });
   });
 
-  server.listen(SOCKET_PATH);
-  return server;
+  return new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(SOCKET_PATH, () => {
+      server.removeListener('error', reject);
+      try { fs.chmodSync(SOCKET_PATH, 0o600); } catch { /* ignore */ }
+      resolve(server);
+    });
+  });
 }
 
 function handleMessage(
@@ -153,16 +182,9 @@ function handleMessage(
 // ─── IPC Client (used by other commands) ───
 
 export async function tryConnectIPC(): Promise<IPCClient | null> {
-  const state = readServeState();
-  if (!state) return null;
-
-  try {
-    process.kill(state.pid, 0);
-  } catch {
-    clearServeState();
-    return null;
-  }
-
+  // Pure socket probe. No PID / state-file checks: those lie after crashes or
+  // PID reuse. If the socket accepts a connection, a daemon is alive.
+  if (!fs.existsSync(SOCKET_PATH)) return null;
   return new Promise((resolve) => {
     let settled = false;
     const timer = setTimeout(() => {
@@ -183,7 +205,6 @@ export async function tryConnectIPC(): Promise<IPCClient | null> {
       if (!settled) {
         settled = true;
         clearTimeout(timer);
-        clearServeState();
         resolve(null);
       }
     });

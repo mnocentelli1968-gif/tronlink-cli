@@ -7,8 +7,8 @@ import { NETWORKS, validateNetworkOption, type TronNetwork } from '../lib/types.
 export function registerNetworkCommand(program: Command): void {
   program
     .command('network')
-    .description('View current network (or switch with --network)')
-    .option('--network <name>', 'Switch to network: mainnet, nile, shasta')
+    .description('View or switch network (prompts browser approval)')
+    .option('--network <name>', 'Switch to network: mainnet, nile, shasta (default: mainnet)')
     .action(async (cmdOpts, cmd) => {
       const opts = cmd.optsWithGlobals();
       try {
