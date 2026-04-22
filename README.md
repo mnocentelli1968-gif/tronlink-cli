@@ -32,6 +32,7 @@ After installation, the `tronlink` command is available globally.
 | `--json`            | off     | Output as JSON for scripts / AI agents                     |
 | `--api-key <key>`   | -       | TronGrid API key (or set `TRON_API_KEY` env)               |
 | `--timeout <ms>`    | 300000  | Signing/connection timeout in milliseconds                 |
+| `--port <n>`        | 3386    | TronLink Signer HTTP port                                  |
 
 All option names are **case-insensitive** (e.g. `--toAddress`, `--TOADDRESS`, `--toaddress` are equivalent).
 
@@ -96,6 +97,55 @@ Parameter validation per type:
 | trc10  | `--toAddress`, `--amount`, `--tokenId`   | `--contract`, `--fee-limit`                           |
 | trc20  | `--toAddress`, `--amount`, `--contract`  | `--tokenId`                                           |
 | trc721 | `--toAddress`, `--contract`, `--tokenId` | `--amount`, `--decimals`                              |
+
+### Trigger Smart Contract
+
+Call any smart contract method. Arguments are a JSON array aligned by position to the types in `--method`.
+
+```bash
+# Writeable call (signed + broadcast)
+tronlink trigger \
+  --contract <address> \
+  --method 'transfer(address,uint256)' \
+  --args '["TRecipient...","1000000"]' \
+  [--call-value <trx>] [--fee-limit <trx>] [--network nile]
+
+# Constant (read-only) call — returns raw hex from constant_result
+tronlink trigger \
+  --contract <address> \
+  --method 'balanceOf(address)' \
+  --args '["TQuery..."]' \
+  --constant [--address <addr>] [--network nile]
+```
+
+Examples:
+
+```bash
+# ERC20 approve
+tronlink trigger --contract TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t \
+  --method 'approve(address,uint256)' \
+  --args '["TSpender...","1000000"]'
+
+# Batch swap with tuple array
+tronlink trigger --contract TDex... \
+  --method 'swap((address,uint256)[],uint256)' \
+  --args '[[["T...","100"],["T...","200"]],"999"]' --fee-limit 200
+
+# Payable call (with --call-value)
+tronlink trigger --contract TPay... --method 'deposit()' --args '[]' --call-value 5
+
+# Read-only query
+tronlink trigger --contract TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t \
+  --method 'balanceOf(address)' --args '["TQuery..."]' --constant --address TQuery...
+```
+
+Notes:
+
+- `--method` takes the Solidity function signature. Names on parameters are optional and ignored: `transfer(address to, uint256 amount)` works the same as `transfer(address,uint256)`.
+- Structured types are fully supported: tuples, nested arrays, arrays of tuples (e.g. `swap((address,uint256)[],uint256)`). Encoding goes through TronWeb's ABI v2 path (ethers under the hood).
+- `--args` must be a JSON array aligned by position to the method's top-level inputs. Tuples are nested JSON arrays (not objects); use strings for `uint256`/`int256` to avoid JS precision loss.
+- Writeable calls run a pre-flight simulation on chain (`triggerConstantContract`) before signing. Contract reverts, insufficient TRX for call-value + fee, and fee-limit overruns are caught before a transaction is ever submitted.
+- `--constant` skips signing and broadcast. Pass `--address` to avoid a wallet prompt when the owner address doesn't matter. Decoded output is not provided — use a Solidity ABI decoder on the returned hex.
 
 ### Staking (Stake 2.0)
 
@@ -197,7 +247,10 @@ All inputs are validated before connecting to TronLink:
 - **Vote counts**: positive integers, no duplicate SR addresses
 - **Network**: must be `mainnet`, `nile`, or `shasta`
 - **Decimals**: non-negative integer (0-77)
-- **Fee limit**: positive number in TRX (TRC20/TRC721 only)
+- **Fee limit**: positive number in TRX (TRC20/TRC721/trigger)
+- **Call value** (trigger only): non-negative number in TRX; `0` is allowed and equivalent to omitting it
+- **Method signature** (trigger): must be `name(type1,type2,...)`; parameter names are optional and ignored
+- **Args** (trigger): valid JSON array whose length matches the method's top-level input count
 - **Transfer type validation**: missing required params or extra inapplicable params are rejected with clear errors
 
 Invalid inputs are rejected immediately with a clear error before any wallet interaction.
@@ -222,9 +275,10 @@ Invalid inputs are rejected immediately with a clear error before any wallet int
 2. For read operations with `--address`: queries TronGrid directly
 3. For write/read without `--address`: connects to the TronLink browser extension for wallet info
 4. Builds unsigned transaction using local TronWeb `transactionBuilder`
-5. Sends transaction to TronLink for signing (browser approval page)
-6. Broadcasts: signer broadcasts by default (returns txId); with `--local-broadcast`, CLI broadcasts locally and verifies the result
-7. Outputs result
+5. Pre-flight check: runs on all write commands (transfer, stake, unstake, delegate, reclaim, vote, trigger). Verifies TRX / token / staked / delegated balances, simulates contract calls to catch reverts, estimates energy & bandwidth burn, validates SR addresses (vote), NFT ownership (TRC721), and delegation unlock times (reclaim) before signing
+6. Sends transaction to TronLink for signing (browser approval page)
+7. Broadcasts: signer broadcasts by default, or CLI broadcasts locally with `--local-broadcast`. In both modes the CLI polls `getUnconfirmedTransactionInfo` until the tx is packed into a block (~3s), and surfaces OUT_OF_ENERGY / REVERT / FAILED as errors
+8. Outputs result
 
 ## AI / Agent Usage
 
@@ -276,6 +330,20 @@ tronlink transfer --type trc10 --tokenId <id> --toAddress <to> --amount <amount>
 
 # TRC721 NFT
 tronlink transfer --type trc721 --contract <contract> --toAddress <to> --tokenId <id> --json
+```
+
+#### Trigger Smart Contract
+
+```bash
+# Writeable call (opens TronLink for signing)
+tronlink trigger --contract <contract> \
+  --method 'transfer(address,uint256)' \
+  --args '["<to>","<rawAmount>"]' --json
+
+# Constant (read-only) call — returns hex, decode with any Solidity decoder
+tronlink trigger --contract <contract> \
+  --method 'balanceOf(address)' \
+  --args '["<address>"]' --constant --address <address> --json
 ```
 
 #### Staking
