@@ -166,7 +166,16 @@ export class ContractNotFoundError extends Error {
  * Fetch TRC10 token decimals (precision) from chain.
  */
 export async function fetchTrc10Decimals(tronWeb: InstanceType<typeof TronWeb>, tokenId: string, network: TronNetwork): Promise<{ decimals: number; name?: string }> {
-  const tokenInfo = await tronWeb.trx.getTokenByID(tokenId);
+  let tokenInfo;
+  try {
+    tokenInfo = await tronWeb.trx.getTokenByID(tokenId);
+  } catch (err) {
+    // TronWeb throws "Token does not exist" for unknown TRC10 ids; normalize to our typed error.
+    if (err instanceof Error && /does not exist/i.test(err.message)) {
+      throw new TokenNotFoundError(tokenId, network);
+    }
+    throw err;
+  }
   if (!tokenInfo || tokenInfo.precision === undefined) {
     throw new TokenNotFoundError(tokenId, network);
   }

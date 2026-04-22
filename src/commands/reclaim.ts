@@ -45,7 +45,10 @@ export function registerReclaimCommand(program: Command): void {
           ? accountResource.TotalEnergyLimit
           : accountResource.TotalNetLimit;
         const estimatedResource = totalWeight > 0
-          ? Math.floor((amountSun / 1_000_000) / totalWeight * totalLimit)
+          ? Number(
+              (BigInt(amountSun) * BigInt(totalLimit)) /
+              (BigInt(totalWeight) * 1_000_000n),
+            )
           : 0;
 
         // eslint-disable-next-line @typescript-eslint/no-explicit-any

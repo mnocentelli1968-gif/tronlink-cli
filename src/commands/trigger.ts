@@ -4,7 +4,7 @@ import { initSigner, getWalletAddress, signTransaction, stopSigner } from '../li
 import { outputResult, outputAction, createSpinner, confirmOnChain } from '../lib/output.js';
 import { handleError } from '../lib/error.js';
 import { getExplorerTxUrl, validateNetworkOption, type TronNetwork } from '../lib/types.js';
-import { parseMethodSignature, parseArgsJson, type AbiFragment } from '../lib/abi.js';
+import { parseMethodSignature, parseArgsJson, canonicalSignature, type AbiFragment } from '../lib/abi.js';
 import { runPrecheck, measureTxBytes, checkTrigger } from '../lib/precheck.js';
 
 const ARGS_PREVIEW_MAX = 80;
@@ -79,11 +79,12 @@ async function runConstant(
   }
 
   const tronWeb = getTronWeb(network, opts.apiKey as string | undefined);
+  const methodSig = canonicalSignature(fragment);
   const spinner = createSpinner('Calling contract (constant)...');
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const res = await (tronWeb.transactionBuilder as any).triggerConstantContract(
     cmdOpts.contract,
-    cmdOpts.method,
+    methodSig,
     { funcABIV2: fragment, parametersV2: args },
     [],
     owner,
@@ -101,7 +102,7 @@ async function runConstant(
   outputResult(
     {
       Contract: cmdOpts.contract,
-      Method: cmdOpts.method,
+      Method: methodSig,
       Caller: owner,
       Network: network,
       Result: hex ? `0x${hex}` : '(empty)',
@@ -127,11 +128,12 @@ async function runWriteable(
   const tronWeb = getTronWeb(network, opts.apiKey as string | undefined);
   const broadcast = !opts.localBroadcast;
 
+  const methodSig = canonicalSignature(fragment);
   const spinner = createSpinner('Building transaction...');
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const { transaction, result } = await (tronWeb.transactionBuilder as any).triggerSmartContract(
     cmdOpts.contract,
-    cmdOpts.method,
+    methodSig,
     { feeLimit: feeLimitSun, callValue: callValueSun, funcABIV2: fragment, parametersV2: args },
     [],
     address,
@@ -149,7 +151,7 @@ async function runWriteable(
     checkTrigger(
       tronWeb,
       cmdOpts.contract!,
-      cmdOpts.method!,
+      methodSig,
       fragment,
       args,
       address,
@@ -163,7 +165,7 @@ async function runWriteable(
     Network: network,
     Caller: address,
     Contract: cmdOpts.contract!,
-    Method: cmdOpts.method!,
+    Method: methodSig,
     Args: summarizeArgs(cmdOpts.args || '[]', args),
     CallValue: `${callValueSun / 1_000_000} TRX`,
     FeeLimit: `${feeLimitSun / 1_000_000} TRX`,
@@ -180,7 +182,7 @@ async function runWriteable(
       TxID: txId,
       Caller: address,
       Contract: cmdOpts.contract!,
-      Method: cmdOpts.method!,
+      Method: methodSig,
       Explorer: getExplorerTxUrl(network, txId),
     },
     'Trigger Result',

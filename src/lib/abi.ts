@@ -63,6 +63,25 @@ function parseType(raw: string): AbiInput {
   return { type: 'tuple' + tail, components };
 }
 
+/**
+ * Rebuild the canonical Solidity signature from a parsed fragment, with all
+ * parameter names stripped. TronWeb computes the function selector from the
+ * signature string we pass in, so user-provided names like
+ * "balanceOf(address owner)" must be normalized to "balanceOf(address)" or
+ * the selector (and the on-chain call) will be wrong.
+ */
+export function canonicalSignature(fragment: AbiFragment): string {
+  const formatInput = (input: AbiInput): string => {
+    if (input.type.startsWith('tuple')) {
+      const tail = input.type.slice('tuple'.length); // '' | '[]' | '[N]' | nested arrays
+      const inner = (input.components || []).map(formatInput).join(',');
+      return `(${inner})${tail}`;
+    }
+    return input.type;
+  };
+  return `${fragment.name}(${fragment.inputs.map(formatInput).join(',')})`;
+}
+
 export function parseMethodSignature(sig: string): AbiFragment {
   const trimmed = sig.trim();
   const open = trimmed.indexOf('(');
