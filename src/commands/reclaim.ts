@@ -28,13 +28,32 @@ export function registerReclaimCommand(program: Command): void {
         const broadcast = !opts.localBroadcast;
 
         const spinner = createSpinner('Building transaction...');
-        const tx = await tronWeb.transactionBuilder.undelegateResource(
-          amountSun,
-          cmdOpts.fromAddress,
-          resource,
-          address,
-        );
-        spinner.succeed('Transaction built');
+        const [tx, accountResource] = await Promise.all([
+          tronWeb.transactionBuilder.undelegateResource(
+            amountSun,
+            cmdOpts.fromAddress,
+            resource,
+            address,
+          ),
+          tronWeb.trx.getAccountResources(address),
+        ]);
+
+        const totalWeight = resource === 'ENERGY'
+          ? accountResource.TotalEnergyWeight
+          : accountResource.TotalNetWeight;
+        const totalLimit = resource === 'ENERGY'
+          ? accountResource.TotalEnergyLimit
+          : accountResource.TotalNetLimit;
+        const estimatedResource = totalWeight > 0
+          ? Math.floor((amountSun / 1_000_000) / totalWeight * totalLimit)
+          : 0;
+
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (tx as any).__options = resource === 'ENERGY'
+          ? { estimatedEnergy: estimatedResource }
+          : { estimatedBandwidth: estimatedResource };
+
+        spinner.succeed(`Transaction built (estimated ${resource.toLowerCase()}: ${estimatedResource.toLocaleString()})`);
 
         await runPrecheck('Checking delegated amount...', () =>
           checkReclaim(tronWeb, address, cmdOpts.fromAddress, resource, amountSun, measureTxBytes(tx)));

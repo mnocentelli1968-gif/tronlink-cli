@@ -43,7 +43,7 @@
     "cli-table3": "0.6.5",
     "commander": "12.1.0",
     "ora": "5.4.1",
-    "tronlink-signer": "file:../mcp-tronlink-signer/packages/tronlink-signer",
+    "tronlink-signer": "0.1.4",
     "tronweb": "6.2.2"
   },
   "overrides": {

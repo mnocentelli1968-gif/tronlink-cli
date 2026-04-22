@@ -43,15 +43,15 @@ export function validateTokenId(value: string): void {
  * Convert TRX string to sun using string-based math to avoid floating point loss.
  * TRX has 6 decimal places (1 TRX = 1,000,000 sun).
  */
-export function trxToSun(trx: string, label = 'TRX amount'): number {
+export function trxToSun(trx: string, label = 'TRX amount', opts: { allowZero?: boolean } = {}): number {
   // Validate input format
   if (!/^\d+(\.\d+)?$/.test(trx)) {
     throw new Error(`Invalid ${label}: "${trx}". Must be a non-negative number`);
   }
   const raw = parseAmount(trx, 6);
   const val = Number(raw);
-  if (val <= 0) {
-    throw new Error(`${label} must be greater than 0`);
+  if (opts.allowZero ? val < 0 : val <= 0) {
+    throw new Error(`${label} must be ${opts.allowZero ? 'non-negative' : 'greater than 0'}`);
   }
   if (!Number.isSafeInteger(val)) {
     throw new Error(`${label} too large: "${trx}"`);

@@ -14,6 +14,7 @@ import { registerConnectCommand } from './commands/connect.js';
 import { registerVoteCommand } from './commands/vote.js';
 import { registerRewardCommand } from './commands/reward.js';
 import { registerServeCommand } from './commands/serve.js';
+import { registerTriggerCommand } from './commands/trigger.js';
 
 export function createProgram(): Command {
   const program = new Command();
@@ -73,6 +74,7 @@ export function createProgram(): Command {
   registerVoteCommand(program);
   registerRewardCommand(program);
   registerServeCommand(program);
+  registerTriggerCommand(program);
 
   return program;
 }

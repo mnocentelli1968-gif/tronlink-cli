@@ -1,6 +1,7 @@
 import { TronWeb } from 'tronweb';
 import { sunToTrx } from './tronweb.js';
 import { outputWarning, createSpinner } from './output.js';
+import type { AbiFragment } from './abi.js';
 
 type TW = InstanceType<typeof TronWeb>;
 export type Resource = 'ENERGY' | 'BANDWIDTH';
@@ -343,6 +344,65 @@ export async function checkTransferTrc721(
     return {
       ok: false,
       reason: `Insufficient TRX for fee: balance ${fmt(trxBalance)}, need ~${fmt(totalFee)}`,
+    };
+  }
+
+  const warnings: string[] = [];
+  if (energyFee > 0) warnings.push(`Energy insufficient (need ${energyNeeded}, have ${res.availableEnergy}) — ~${fmt(energyFee)} will be burned`);
+  if (bwFee > 0) warnings.push(`Bandwidth insufficient — ~${fmt(bwFee)} will be burned`);
+  return { ok: true, warnings };
+}
+
+export async function checkTrigger(
+  tronWeb: TW,
+  contract: string,
+  method: string,
+  funcABIV2: AbiFragment,
+  parametersV2: unknown[],
+  from: string,
+  callValueSun: number,
+  feeLimitSun: number,
+  txBytes: number,
+): Promise<CheckResult> {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const simResult = await (tronWeb.transactionBuilder as any).triggerConstantContract(
+    contract,
+    method,
+    { callValue: callValueSun, funcABIV2, parametersV2 },
+    [],
+    from,
+  );
+  const simFail = detectSimulationFailure(simResult);
+  if (simFail) return { ok: false, reason: `Contract simulation failed: ${simFail}` };
+
+  const energyUsed = (simResult as unknown as { energy_used?: number }).energy_used || 0;
+  const energyNeeded = Math.ceil(energyUsed * ENERGY_BUFFER);
+
+  const [acc, res, rates] = await Promise.all([
+    tronWeb.trx.getAccount(from),
+    getResourceState(tronWeb, from),
+    getFeeRates(tronWeb),
+  ]);
+  const trxBalance = getBalanceFromAccount(acc);
+
+  const bwFee = estimateBandwidthFee(res.availableBandwidth, txBytes, rates.bandwidthFee);
+  const energyFee = estimateEnergyFee(res.availableEnergy, energyNeeded, rates.energyFee);
+  const totalFee = bwFee + energyFee;
+  const totalNeed = callValueSun + totalFee;
+
+  if (totalFee > feeLimitSun) {
+    return {
+      ok: false,
+      reason: `Estimated fee ~${fmt(totalFee)} exceeds --fee-limit ${fmt(feeLimitSun)} (energy needed ${energyNeeded}, available ${res.availableEnergy}). Raise --fee-limit or stake more TRX for energy`,
+    };
+  }
+  if (totalNeed > trxBalance) {
+    const parts: string[] = [];
+    if (callValueSun > 0) parts.push(`callValue ${fmt(callValueSun)}`);
+    if (totalFee > 0) parts.push(`fee ~${fmt(totalFee)}`);
+    return {
+      ok: false,
+      reason: `Insufficient TRX: balance ${fmt(trxBalance)}, need ${fmt(totalNeed)} (${parts.join(' + ')})`,
     };
   }
 
