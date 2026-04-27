@@ -66,8 +66,18 @@ export function registerServeCommand(program: Command): void {
           ? (signer as any).getPort()
           : signer.getConfig().httpPort;
 
+        // Activity tracking for idle auto-shutdown. Update on every IPC entry
+        // and exit; long-running operations (e.g. signTransaction waiting for
+        // browser approval) are also covered by inFlightRequests so the daemon
+        // never shuts down mid-operation.
+        let lastActivityAt = Date.now();
+        let inFlightRequests = 0;
+
         // Browser UI now shows all pending requests as tabs, so no queue concept on the CLI side.
         const ipc = await startIPCServer(async (method, params, signal) => {
+          lastActivityAt = Date.now();
+          inFlightRequests++;
+          try {
           if (method === 'connectWallet') {
             return signer.connectWallet(
               params.network as TronNetwork | undefined,
@@ -117,6 +127,10 @@ export function registerServeCommand(program: Command): void {
             return { status: 'shutting down' };
           }
           throw new Error(`Unknown IPC method: ${method}`);
+          } finally {
+            inFlightRequests--;
+            lastActivityAt = Date.now();
+          }
         });
 
         // Listen succeeded — release boot lock immediately. Do NOT hold it for
@@ -156,7 +170,18 @@ export function registerServeCommand(program: Command): void {
         };
 
         if (cmdOpts.daemon) {
-          setInterval(() => {}, 60_000);
+          // Idle auto-shutdown: gracefully exit when no IPC activity for
+          // IDLE_TIMEOUT_MS and nothing in flight. Foreground (non-daemon) mode
+          // skips this — the user is watching the process and will Ctrl+C
+          // when done. The check itself keeps the event loop alive, so no
+          // separate keepalive setInterval is needed.
+          const IDLE_TIMEOUT_MS = 10 * 60_000;
+          setInterval(() => {
+            if (inFlightRequests > 0) return;
+            if (Date.now() - lastActivityAt < IDLE_TIMEOUT_MS) return;
+            console.error(`[serve] Idle for ${IDLE_TIMEOUT_MS / 60_000} minutes — shutting down.`);
+            cleanup();
+          }, 60_000);
         } else {
           outputInfo('Connecting wallet...');
           const network = cmdOpts.network as TronNetwork | undefined;
