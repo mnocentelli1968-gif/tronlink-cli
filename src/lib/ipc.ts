@@ -108,10 +108,26 @@ export type RequestHandler = (
   signal: AbortSignal,
 ) => Promise<unknown>;
 
-export function startIPCServer(handler: RequestHandler): Promise<net.Server> {
+export interface IPCServerHandle {
+  server: net.Server;
+  /**
+   * Forcefully close every connected client. Each conn's `close` handler
+   * already aborts its in-flight signer operations, which propagates back
+   * to the CLI client as `IPC connection closed`. Use this when the daemon
+   * needs to invalidate active CLI calls without exiting (e.g. browser
+   * disconnect: the in-flight request can no longer be approved, but the
+   * daemon itself stays alive for the next command).
+   */
+  closeActiveConnections(): void;
+}
+
+export function startIPCServer(handler: RequestHandler): Promise<IPCServerHandle> {
   try { fs.unlinkSync(SOCKET_PATH); } catch { /* ignore */ }
 
+  const activeConns = new Set<net.Socket>();
+
   const server = net.createServer((conn) => {
+    activeConns.add(conn);
     let buffer = '';
     // AbortControllers for in-flight operations on this connection
     const activeAborts = new Set<AbortController>();
@@ -130,6 +146,7 @@ export function startIPCServer(handler: RequestHandler): Promise<net.Server> {
     });
 
     conn.on('close', () => {
+      activeConns.delete(conn);
       // CLI disconnected — abort all in-flight signer operations
       for (const controller of activeAborts) {
         controller.abort();
@@ -143,7 +160,15 @@ export function startIPCServer(handler: RequestHandler): Promise<net.Server> {
     server.listen(SOCKET_PATH, () => {
       server.removeListener('error', reject);
       try { fs.chmodSync(SOCKET_PATH, 0o600); } catch { /* ignore */ }
-      resolve(server);
+      resolve({
+        server,
+        closeActiveConnections: () => {
+          for (const conn of activeConns) {
+            conn.destroy();
+          }
+          activeConns.clear();
+        },
+      });
     });
   });
 }

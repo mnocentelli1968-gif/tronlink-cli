@@ -67,7 +67,7 @@ export function registerServeCommand(program: Command): void {
           : signer.getConfig().httpPort;
 
         // Browser UI now shows all pending requests as tabs, so no queue concept on the CLI side.
-        const ipcServer = await startIPCServer(async (method, params, signal) => {
+        const ipc = await startIPCServer(async (method, params, signal) => {
           if (method === 'connectWallet') {
             return signer.connectWallet(
               params.network as TronNetwork | undefined,
@@ -127,20 +127,27 @@ export function registerServeCommand(program: Command): void {
 
         const cleanup = () => {
           clearServeState();
-          ipcServer.close();
+          ipc.server.close();
           signer.stop().catch(() => {});
           process.exit(0);
         };
         process.on('SIGINT', cleanup);
         process.on('SIGTERM', cleanup);
 
-        // Browser disconnect ≠ shutdown. The SDK already invalidates its
-        // connectedWallet cache (tron-signer.ts) when this fires, so the next
-        // CLI request will trigger openApprovalPage and reopen the tab.
-        // Killing the daemon here would force every subsequent command to
-        // pay the ~10s daemon cold-start cost.
+        // Browser disconnect ≠ daemon shutdown. The SDK already invalidates
+        // its connectedWallet cache when this fires, so the next CLI request
+        // will reopen the signer tab via openApprovalPage. Killing the daemon
+        // here would force every subsequent command to pay the ~10s cold-start.
+        //
+        // But any in-flight CLI request would otherwise hang for 5 minutes
+        // (SDK's pending-store timeout) since the closed tab will never POST
+        // /api/complete. Closing the IPC connection cascades:
+        //   conn.close → activeAborts.abort() → SDK rejects pending with
+        //   CANCELLED_BY_CALLER → IPC handler writes error → client gets
+        //   "IPC connection closed" → error.ts shows the right message.
         signer.onBrowserDisconnect = () => {
-          console.error('[serve] Browser disconnected — wallet cache cleared, daemon kept alive.');
+          console.error('[serve] Browser disconnected — aborting in-flight requests, daemon kept alive.');
+          ipc.closeActiveConnections();
         };
 
         // Log wallet-change events — pendings are already rejected by SDK
