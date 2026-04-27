@@ -54,6 +54,15 @@ export async function initSigner(port?: number): Promise<TronSigner> {
   if (!signerInstance) {
     signerInstance = new TronSigner();
   }
+  // Mirror the daemon's safety net (commands/serve.ts) so floating promise
+  // rejections from the SDK (e.g. WALLET_CHANGED clearing pendings, abort
+  // cleanup) don't crash the CLI process. Real errors still surface via the
+  // awaited call paths in getWalletAddress/signTransaction.
+  process.on('unhandledRejection', (err) => {
+    if (err instanceof Error && err.message === 'CANCELLED_BY_CALLER') return;
+    if (err instanceof Error && /^WALLET_CHANGED/.test(err.message)) return;
+    console.error('[signer] Unhandled rejection:', err);
+  });
   await signerInstance.start();
 
   // Only stop signer on process exit/SIGTERM, NOT on SIGINT

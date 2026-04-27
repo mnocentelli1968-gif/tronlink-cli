@@ -47,10 +47,14 @@ export function registerServeCommand(program: Command): void {
           process.env.TRON_HTTP_PORT = String(port);
         }
 
-        // Catch unhandled rejections from SDK's attachAbortSignal
-        // (promise.finally() creates a floating rejected promise on abort)
+        // Safety net for SDK floating-promise patterns. The SDK now uses
+        // promise.then(fn, fn) for cleanup hooks, so this listener should
+        // rarely fire; older SDK versions may still leak rejections through
+        // promise.finally(). WALLET_CHANGED is an expected user action, not
+        // an error worth logging.
         process.on('unhandledRejection', (err) => {
           if (err instanceof Error && err.message === 'CANCELLED_BY_CALLER') return;
+          if (err instanceof Error && /^WALLET_CHANGED/.test(err.message)) return;
           console.error('[serve] Unhandled rejection:', err);
         });
 
@@ -130,10 +134,13 @@ export function registerServeCommand(program: Command): void {
         process.on('SIGINT', cleanup);
         process.on('SIGTERM', cleanup);
 
-        // Stop serve when browser is closed
+        // Browser disconnect ≠ shutdown. The SDK already invalidates its
+        // connectedWallet cache (tron-signer.ts) when this fires, so the next
+        // CLI request will trigger openApprovalPage and reopen the tab.
+        // Killing the daemon here would force every subsequent command to
+        // pay the ~10s daemon cold-start cost.
         signer.onBrowserDisconnect = () => {
-          console.error('[serve] Browser disconnected, shutting down...');
-          cleanup();
+          console.error('[serve] Browser disconnected — wallet cache cleared, daemon kept alive.');
         };
 
         // Log wallet-change events — pendings are already rejected by SDK

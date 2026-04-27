@@ -121,7 +121,7 @@ tronlink trigger \
 Examples:
 
 ```bash
-# ERC20 approve
+# TRC20 approve
 tronlink trigger --contract TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t \
   --method 'approve(address,uint256)' \
   --args '["TSpender...","1000000"]'
