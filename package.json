@@ -47,7 +47,7 @@
     "tronweb": "6.2.2"
   },
   "overrides": {
-    "axios": "1.15.0"
+    "axios": "1.15.2"
   },
   "devDependencies": {
     "@types/node": "20.0.0",
