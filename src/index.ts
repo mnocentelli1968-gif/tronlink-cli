@@ -76,5 +76,16 @@ export function createProgram(): Command {
   registerServeCommand(program);
   registerTriggerCommand(program);
 
+  // No subcommand declares positional `.argument()`s — every input goes through
+  // a `--flag`. Commander defaults to silently accepting extra positional
+  // tokens, which lets typos like `tronlink trigger constant --contract …`
+  // (forgot the `--`) run as if `constant` weren't there. Walk the tree and
+  // make every (sub-)command reject excess args.
+  const enforceStrictArgs = (cmd: Command): void => {
+    cmd.allowExcessArguments(false);
+    cmd.commands.forEach(enforceStrictArgs);
+  };
+  enforceStrictArgs(program);
+
   return program;
 }

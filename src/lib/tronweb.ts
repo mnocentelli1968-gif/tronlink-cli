@@ -1,5 +1,6 @@
 import { TronWeb } from 'tronweb';
 import { NETWORKS, type TronNetwork } from './types.js';
+import type { AbiFragment } from './abi.js';
 
 let tronWebInstance: InstanceType<typeof TronWeb> | null = null;
 let currentNetwork: TronNetwork | null = null;
@@ -18,6 +19,54 @@ export function getTronWeb(network: TronNetwork, apiKey?: string): InstanceType<
   currentNetwork = network;
   currentApiKey = key;
   return tronWebInstance;
+}
+
+// triggerConstantContract goes through tronweb's resultManager which throws on
+// any chain-level `result.message` (including the literal "REVERT opcode
+// executed" returned for any Solidity revert), discarding `constant_result` —
+// the very field that holds the actual revert payload. We bypass it by
+// reusing tronweb's private `_getTriggerSmartContractArgs` to build the body
+// and posting to /wallet/triggerconstantcontract directly, so callers can
+// inspect the raw response (constant_result included) themselves.
+export interface TriggerConstantResult {
+  result?: { result?: boolean; code?: string; message?: string };
+  constant_result?: string[];
+  energy_used?: number;
+  transaction?: unknown;
+}
+
+export async function triggerConstantRaw(
+  tronWeb: InstanceType<typeof TronWeb>,
+  contract: string,
+  funcSig: string,
+  options: {
+    callValue?: number;
+    funcABIV2?: AbiFragment;
+    parametersV2?: unknown[];
+  },
+  parameters: Array<{ type: string; value: unknown }>,
+  from: string,
+): Promise<TriggerConstantResult> {
+  const opts = { ...options, _isConstant: true };
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const tb = tronWeb.transactionBuilder as any;
+  const body = tb._getTriggerSmartContractArgs(
+    contract,
+    funcSig,
+    opts,
+    parameters,
+    from,
+    undefined,             // tokenValue
+    undefined,             // tokenId
+    options.callValue ?? 0,
+    0,                     // feeLimit (ignored when _isConstant)
+  );
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return (tronWeb.fullNode as any).request(
+    'wallet/triggerconstantcontract',
+    body,
+    'post',
+  ) as Promise<TriggerConstantResult>;
 }
 
 export function sunToTrx(sun: number): string {

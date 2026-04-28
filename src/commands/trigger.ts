@@ -1,11 +1,12 @@
 import { Command } from 'commander';
-import { getTronWeb, trxToSun, broadcastTx, validateAddress, waitForTxResult } from '../lib/tronweb.js';
+import { getTronWeb, trxToSun, broadcastTx, validateAddress, waitForTxResult, triggerConstantRaw } from '../lib/tronweb.js';
 import { initSigner, getWalletAddress, signTransaction, stopSigner } from '../lib/signer.js';
 import { outputResult, outputAction, createSpinner, confirmOnChain } from '../lib/output.js';
 import { handleError } from '../lib/error.js';
 import { getExplorerTxUrl, validateNetworkOption, type TronNetwork } from '../lib/types.js';
 import { parseMethodSignature, parseArgsJson, canonicalSignature, type AbiFragment } from '../lib/abi.js';
 import { runPrecheck, measureTxBytes, checkTrigger } from '../lib/precheck.js';
+import { decodeRevertData } from '../lib/revert.js';
 
 const ARGS_PREVIEW_MAX = 80;
 
@@ -81,20 +82,26 @@ async function runConstant(
   const tronWeb = getTronWeb(network, opts.apiKey as string | undefined);
   const methodSig = canonicalSignature(fragment);
   const spinner = createSpinner('Calling contract (constant)...');
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const res = await (tronWeb.transactionBuilder as any).triggerConstantContract(
-    cmdOpts.contract,
+  const res = await triggerConstantRaw(
+    tronWeb,
+    cmdOpts.contract!,
     methodSig,
     { funcABIV2: fragment, parametersV2: args },
     [],
     owner,
   );
-  if (!res?.result?.result) {
+  // TRON can mark a revert via `result.result === false`, `result.code`, or a
+  // hex-encoded `result.message` — any of them counts as failure.
+  const failed = res?.result?.result === false || !!res?.result?.code || !!res?.result?.message;
+  if (failed) {
     spinner.fail('Constant call failed');
-    const msg = res?.result?.message
+    // Prefer the decoded contract revert (specific) over the chain-level
+    // message (often just generic "REVERT opcode executed" hex).
+    const decoded = decodeRevertData(res?.constant_result?.[0]);
+    const chainMsg = res?.result?.message
       ? Buffer.from(res.result.message, 'hex').toString('utf8')
-      : 'triggerConstantContract returned no result';
-    throw new Error(msg);
+      : '';
+    throw new Error(decoded || chainMsg || res?.result?.code || 'triggerConstantContract returned no result');
   }
   spinner.succeed('Called');
 

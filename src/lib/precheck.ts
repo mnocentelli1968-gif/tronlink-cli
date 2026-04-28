@@ -1,6 +1,7 @@
 import { TronWeb } from 'tronweb';
-import { sunToTrx } from './tronweb.js';
+import { sunToTrx, triggerConstantRaw } from './tronweb.js';
 import { outputWarning, createSpinner } from './output.js';
+import { decodeRevertData } from './revert.js';
 import type { AbiFragment } from './abi.js';
 
 type TW = InstanceType<typeof TronWeb>;
@@ -27,9 +28,6 @@ export function measureTxBytes(tx: { raw_data_hex?: string }): number {
   }
   return tx.raw_data_hex.length / 2 + SIGNATURE_BYTES;
 }
-
-// Selector of `Error(string)` — used to detect standard Solidity reverts.
-const ERROR_STRING_SELECTOR = '08c379a0';
 
 function fmt(sun: number): string {
   return `${sunToTrx(sun)} TRX`;
@@ -104,32 +102,26 @@ function applyFeeRule(trxBalance: number, feeSun: number, feeLabel: string): Che
   return { ok: true, warnings };
 }
 
-// Inspect a triggerConstantContract response for failure.
-// Handles both `result.code` style errors and standard `Error(string)` reverts
-// returned via constant_result[0] with selector 0x08c379a0.
+// Inspect a triggerConstantContract response for failure. TRON marks revert
+// with any of: `result.result === false`, `result.code` (e.g.
+// REVERT_OPCODE_EXECUTED, CONTRACT_VALIDATE_ERROR), or `result.message` (hex
+// of a chain-level reason). Once we know it failed, prefer the contract-level
+// payload in `constant_result[0]` (decoded via the shared revert helper) over
+// the chain message — the chain message is often just generic
+// "REVERT opcode executed" hex.
 function detectSimulationFailure(simResult: unknown): string | null {
   const r = simResult as {
-    result?: { code?: string; message?: string };
+    result?: { result?: boolean; code?: string; message?: string };
     constant_result?: string[];
   };
-  if (r.result?.code) {
-    return r.result.message
-      ? Buffer.from(r.result.message, 'hex').toString('utf-8')
-      : r.result.code;
-  }
-  const data = r.constant_result?.[0];
-  if (data && data.toLowerCase().startsWith(ERROR_STRING_SELECTOR)) {
-    try {
-      // ABI: selector(4B) + offset(32B) + length(32B) + string bytes
-      const lenHex = data.slice(8 + 64, 8 + 64 + 64);
-      const len = parseInt(lenHex, 16);
-      const strHex = data.slice(8 + 64 + 64, 8 + 64 + 64 + len * 2);
-      return Buffer.from(strHex, 'hex').toString('utf-8') || 'Contract reverted';
-    } catch {
-      return 'Contract reverted';
-    }
-  }
-  return null;
+  const failed = r.result?.result === false || !!r.result?.code || !!r.result?.message;
+  if (!failed) return null;
+
+  const decoded = decodeRevertData(r.constant_result?.[0]);
+  if (decoded) return decoded;
+  if (r.result?.message) return Buffer.from(r.result.message, 'hex').toString('utf-8');
+  if (r.result?.code) return r.result.code;
+  return 'Contract reverted';
 }
 
 function getBalanceFromAccount(acc: unknown): number {
@@ -210,7 +202,8 @@ export async function checkTransferTrc20(
   feeLimitSun: number,
   txBytes: number,
 ): Promise<CheckResult> {
-  const balResult = await tronWeb.transactionBuilder.triggerConstantContract(
+  const balResult = await triggerConstantRaw(
+    tronWeb,
     contract,
     'balanceOf(address)',
     {},
@@ -232,7 +225,8 @@ export async function checkTransferTrc20(
     };
   }
 
-  const simResult = await tronWeb.transactionBuilder.triggerConstantContract(
+  const simResult = await triggerConstantRaw(
+    tronWeb,
     contract,
     'transfer(address,uint256)',
     {},
@@ -286,7 +280,8 @@ export async function checkTransferTrc721(
   feeLimitSun: number,
   txBytes: number,
 ): Promise<CheckResult> {
-  const ownResult = await tronWeb.transactionBuilder.triggerConstantContract(
+  const ownResult = await triggerConstantRaw(
+    tronWeb,
     contract,
     'ownerOf(uint256)',
     {},
@@ -307,7 +302,8 @@ export async function checkTransferTrc721(
     return { ok: false, reason: `NFT #${tokenId} is owned by ${ownerBase58}, not ${from}` };
   }
 
-  const simResult = await tronWeb.transactionBuilder.triggerConstantContract(
+  const simResult = await triggerConstantRaw(
+    tronWeb,
     contract,
     'transferFrom(address,address,uint256)',
     {},
@@ -364,8 +360,8 @@ export async function checkTrigger(
   feeLimitSun: number,
   txBytes: number,
 ): Promise<CheckResult> {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const simResult = await (tronWeb.transactionBuilder as any).triggerConstantContract(
+  const simResult = await triggerConstantRaw(
+    tronWeb,
     contract,
     method,
     { callValue: callValueSun, funcABIV2, parametersV2 },
