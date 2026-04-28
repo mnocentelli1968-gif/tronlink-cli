@@ -159,7 +159,20 @@ export function startIPCServer(handler: RequestHandler): Promise<IPCServerHandle
     server.once('error', reject);
     server.listen(SOCKET_PATH, () => {
       server.removeListener('error', reject);
-      try { fs.chmodSync(SOCKET_PATH, 0o600); } catch { /* ignore */ }
+      // The listen→chmod window is gated by the parent dir already being
+      // 0o700 (ensureServeDir), so no other uid can traverse to the socket
+      // path even before chmod runs. We still tighten the socket itself, and
+      // unlike before we abort on chmod failure rather than silently leaving
+      // it at the umask default — a swallowed chmod is exactly the failure
+      // mode that would matter if the parent dir guarantee ever regresses.
+      try {
+        fs.chmodSync(SOCKET_PATH, 0o600);
+      } catch (err) {
+        try { fs.unlinkSync(SOCKET_PATH); } catch { /* ignore */ }
+        server.close(() => {});
+        reject(err instanceof Error ? err : new Error(String(err)));
+        return;
+      }
       resolve({
         server,
         closeActiveConnections: () => {
