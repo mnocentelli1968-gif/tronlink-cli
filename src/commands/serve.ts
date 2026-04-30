@@ -1,6 +1,6 @@
 import { Command } from 'commander';
 import { TronSigner } from 'tronlink-signer';
-import { startIPCServer, writeServeState, clearServeState, readServeState, acquireServeLock } from '../lib/ipc.js';
+import { startIPCServer, writeServeState, clearServeState, readServeState, acquireBootLock, isDaemonAlive, tryConnectIPC } from '../lib/ipc.js';
 
 import { validateNetworkOption, type TronNetwork } from '../lib/types.js';
 import { outputSuccess, outputResult, outputInfo } from '../lib/output.js';
@@ -16,24 +16,27 @@ export function registerServeCommand(program: Command): void {
     .option('--daemon', 'Run in background (used internally)')
     .action(async (cmdOpts, cmd) => {
       const opts = cmd.optsWithGlobals();
+      let releaseBootLock: (() => void) | null = null;
       try {
         validateNetworkOption(cmdOpts.network);
 
-        const existing = readServeState();
-        if (existing) {
-          try {
-            process.kill(existing.pid, 0);
-            if (cmdOpts.daemon) process.exit(0);
-            console.error(`Serve is already running (PID: ${existing.pid}, port: ${existing.port}). Use "tronlink serve stop" to stop it first.`);
-            process.exit(1);
-          } catch {
-            clearServeState();
-          }
+        // Liveness = socket connectivity (not PID). PID is reused by the kernel
+        // and cannot be trusted across daemon crashes.
+        if (await isDaemonAlive()) {
+          const existing = readServeState();
+          if (cmdOpts.daemon) process.exit(0);
+          const suffix = existing ? ` (PID: ${existing.pid}, port: ${existing.port})` : '';
+          console.error(`Serve is already running${suffix}. Use "tronlink serve stop" to stop it first.`);
+          process.exit(1);
         }
+        // Socket dead → any residual state is stale regardless of PID.
+        clearServeState();
 
-        // Acquire exclusive lock to prevent concurrent starts
-        const releaseLock = acquireServeLock();
-        if (!releaseLock) {
+        // Short-lived lock guarding only the startup sequence (unlink + listen).
+        // Released as soon as listen succeeds — the running daemon is identified
+        // by its live socket, not by this lock.
+        releaseBootLock = acquireBootLock();
+        if (!releaseBootLock) {
           if (cmdOpts.daemon) process.exit(0);
           console.error('Another serve instance is starting. Please wait.');
           process.exit(1);
@@ -44,10 +47,14 @@ export function registerServeCommand(program: Command): void {
           process.env.TRON_HTTP_PORT = String(port);
         }
 
-        // Catch unhandled rejections from SDK's attachAbortSignal
-        // (promise.finally() creates a floating rejected promise on abort)
+        // Safety net for SDK floating-promise patterns. The SDK now uses
+        // promise.then(fn, fn) for cleanup hooks, so this listener should
+        // rarely fire; older SDK versions may still leak rejections through
+        // promise.finally(). WALLET_CHANGED is an expected user action, not
+        // an error worth logging.
         process.on('unhandledRejection', (err) => {
           if (err instanceof Error && err.message === 'CANCELLED_BY_CALLER') return;
+          if (err instanceof Error && /^WALLET_CHANGED/.test(err.message)) return;
           console.error('[serve] Unhandled rejection:', err);
         });
 
@@ -59,8 +66,18 @@ export function registerServeCommand(program: Command): void {
           ? (signer as any).getPort()
           : signer.getConfig().httpPort;
 
+        // Activity tracking for idle auto-shutdown. Update on every IPC entry
+        // and exit; long-running operations (e.g. signTransaction waiting for
+        // browser approval) are also covered by inFlightRequests so the daemon
+        // never shuts down mid-operation.
+        let lastActivityAt = Date.now();
+        let inFlightRequests = 0;
+
         // Browser UI now shows all pending requests as tabs, so no queue concept on the CLI side.
-        const ipcServer = startIPCServer(async (method, params, signal) => {
+        const ipc = await startIPCServer(async (method, params, signal) => {
+          lastActivityAt = Date.now();
+          inFlightRequests++;
+          try {
           if (method === 'connectWallet') {
             return signer.connectWallet(
               params.network as TronNetwork | undefined,
@@ -71,36 +88,80 @@ export function registerServeCommand(program: Command): void {
             return signer.getConnectedWallet();
           }
           if (method === 'signTransaction') {
-            // confirm: false — CLI does its own waitForTxResult polling, don't double-wait
-            return signer.signTransaction(
-              params.transaction as Record<string, unknown>,
-              params.network as TronNetwork | undefined,
-              params.broadcast as boolean | undefined,
-              { signal, confirm: false },
-            );
+            // Browser SDK polls on-chain and shows result in UI; CLI client also polls
+            // independently. onBroadcasted captures {txId, signedTransaction} on
+            // successful broadcast — if the promise later rejects (tab closed,
+            // heartbeat timeout, WALLET_CHANGED), we still return a pending-status
+            // result so the client keeps polling and the tx isn't lost.
+            const broadcast = params.broadcast as boolean | undefined;
+            let captured: { txId: string; signedTransaction: Record<string, unknown> } | null = null;
+            try {
+              return await signer.signTransaction(
+                params.transaction as Record<string, unknown>,
+                params.network as TronNetwork | undefined,
+                broadcast,
+                {
+                  signal,
+                  onBroadcasted: (info) => { captured = info; },
+                },
+              );
+            } catch (err) {
+              if (broadcast && captured) {
+                return {
+                  signedTransaction: (captured as { signedTransaction: Record<string, unknown> }).signedTransaction,
+                  txId: (captured as { txId: string }).txId,
+                  status: 'pending' as const,
+                };
+              }
+              throw err;
+            }
           }
           if (method === 'ping') {
             return { status: 'ok' };
           }
+          if (method === 'shutdown') {
+            // Defer so the response can ship before the process dies. Signal
+            // ourselves — never trust an external PID to avoid killing an
+            // unrelated process that inherited a reused PID.
+            setTimeout(() => process.kill(process.pid, 'SIGTERM'), 50);
+            return { status: 'shutting down' };
+          }
           throw new Error(`Unknown IPC method: ${method}`);
+          } finally {
+            inFlightRequests--;
+            lastActivityAt = Date.now();
+          }
         });
 
+        // Listen succeeded — release boot lock immediately. Do NOT hold it for
+        // the daemon's lifetime: liveness is tracked via socket, not this lock.
+        releaseBootLock();
+        releaseBootLock = null;
         writeServeState(actualPort);
 
         const cleanup = () => {
           clearServeState();
-          releaseLock();
-          ipcServer.close();
+          ipc.server.close();
           signer.stop().catch(() => {});
           process.exit(0);
         };
         process.on('SIGINT', cleanup);
         process.on('SIGTERM', cleanup);
 
-        // Stop serve when browser is closed
+        // Browser disconnect ≠ daemon shutdown. The SDK already invalidates
+        // its connectedWallet cache when this fires, so the next CLI request
+        // will reopen the signer tab via openApprovalPage. Killing the daemon
+        // here would force every subsequent command to pay the ~10s cold-start.
+        //
+        // But any in-flight CLI request would otherwise hang for 5 minutes
+        // (SDK's pending-store timeout) since the closed tab will never POST
+        // /api/complete. Closing the IPC connection cascades:
+        //   conn.close → activeAborts.abort() → SDK rejects pending with
+        //   CANCELLED_BY_CALLER → IPC handler writes error → client gets
+        //   "IPC connection closed" → error.ts shows the right message.
         signer.onBrowserDisconnect = () => {
-          console.error('[serve] Browser disconnected, shutting down...');
-          cleanup();
+          console.error('[serve] Browser disconnected — aborting in-flight requests, daemon kept alive.');
+          ipc.closeActiveConnections();
         };
 
         // Log wallet-change events — pendings are already rejected by SDK
@@ -109,7 +170,18 @@ export function registerServeCommand(program: Command): void {
         };
 
         if (cmdOpts.daemon) {
-          setInterval(() => {}, 60_000);
+          // Idle auto-shutdown: gracefully exit when no IPC activity for
+          // IDLE_TIMEOUT_MS and nothing in flight. Foreground (non-daemon) mode
+          // skips this — the user is watching the process and will Ctrl+C
+          // when done. The check itself keeps the event loop alive, so no
+          // separate keepalive setInterval is needed.
+          const IDLE_TIMEOUT_MS = 10 * 60_000;
+          setInterval(() => {
+            if (inFlightRequests > 0) return;
+            if (Date.now() - lastActivityAt < IDLE_TIMEOUT_MS) return;
+            console.error(`[serve] Idle for ${IDLE_TIMEOUT_MS / 60_000} minutes — shutting down.`);
+            cleanup();
+          }, 60_000);
         } else {
           outputInfo('Connecting wallet...');
           const network = cmdOpts.network as TronNetwork | undefined;
@@ -128,6 +200,9 @@ export function registerServeCommand(program: Command): void {
           setInterval(() => {}, 60_000);
         }
       } catch (err) {
+        if (releaseBootLock) {
+          try { releaseBootLock(); } catch { /* ignore */ }
+        }
         clearServeState();
         handleError(err);
       }
@@ -136,19 +211,39 @@ export function registerServeCommand(program: Command): void {
   serve
     .command('stop')
     .description('Stop the running serve process')
-    .action(() => {
+    .action(async () => {
       const state = readServeState();
-      if (!state) {
-        console.error('No serve process is running.');
+
+      if (!(await isDaemonAlive())) {
+        clearServeState();
+        if (!state) {
+          console.error('No serve process is running.');
+          process.exit(1);
+        }
+        outputSuccess('Serve process was not running. State cleaned up.');
+        return;
+      }
+
+      // Alive — tell it to shut itself down over IPC. Never send signals to
+      // state.pid: the kernel may have reassigned that PID to an unrelated
+      // process after a daemon crash.
+      const client = await tryConnectIPC();
+      if (!client) {
+        clearServeState();
+        console.error('Could not connect to running serve.');
         process.exit(1);
       }
       try {
-        process.kill(state.pid, 'SIGTERM');
-        clearServeState();
-        outputSuccess(`Serve process (PID: ${state.pid}) stopped.`);
-      } catch {
-        clearServeState();
-        outputSuccess('Serve process was not running. State cleaned up.');
+        await client.call('shutdown', {}, 5000);
+      } catch { /* connection closes during shutdown — expected */ }
+      client.disconnect();
+
+      // Wait briefly for the daemon's cleanup to finish (socket disappears).
+      for (let i = 0; i < 20; i++) {
+        if (!(await isDaemonAlive(100))) break;
+        await new Promise((r) => setTimeout(r, 100));
       }
+      clearServeState();
+      outputSuccess(state ? `Serve process (PID: ${state.pid}) stopped.` : 'Serve process stopped.');
     });
 }

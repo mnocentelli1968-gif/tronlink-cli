@@ -8,8 +8,8 @@ import type { TronNetwork } from '../lib/types.js';
 export function registerConnectCommand(program: Command): void {
   program
     .command('connect')
-    .description('Connect TronLink wallet')
-    .option('--network <name>', 'Network: mainnet, nile, shasta (omit to use wallet current network)')
+    .description('Connect TronLink wallet (prompts browser approval)')
+    .option('--network <name>', 'Network: mainnet, nile, shasta (default: mainnet)')
     .action(async (cmdOpts, cmd) => {
       const opts = cmd.optsWithGlobals();
       try {

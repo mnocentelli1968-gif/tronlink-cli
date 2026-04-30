@@ -26,6 +26,10 @@ const OPTION_CANONICAL: Record<string, string> = {
   '--api-key': '--api-key',
   '--timeout': '--timeout',
   '--daemon': '--daemon',
+  '--method': '--method',
+  '--args': '--args',
+  '--call-value': '--call-value',
+  '--constant': '--constant',
 };
 
 function normalizeArgv(argv: string[]): string[] {

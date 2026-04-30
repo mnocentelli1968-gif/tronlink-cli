@@ -1,6 +1,6 @@
 {
   "name": "@tronlink/tronlink-cli",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "CLI tool for TRON blockchain operations via TronLink wallet",
   "type": "module",
   "main": "dist/index.js",
@@ -43,11 +43,11 @@
     "cli-table3": "0.6.5",
     "commander": "12.1.0",
     "ora": "5.4.1",
-    "tronlink-signer": "0.1.3",
+    "tronlink-signer": "0.1.4",
     "tronweb": "6.2.2"
   },
   "overrides": {
-    "axios": "1.15.0"
+    "axios": "1.15.2"
   },
   "devDependencies": {
     "@types/node": "20.0.0",

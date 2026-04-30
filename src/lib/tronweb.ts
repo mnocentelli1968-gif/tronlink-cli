@@ -1,5 +1,6 @@
 import { TronWeb } from 'tronweb';
 import { NETWORKS, type TronNetwork } from './types.js';
+import type { AbiFragment } from './abi.js';
 
 let tronWebInstance: InstanceType<typeof TronWeb> | null = null;
 let currentNetwork: TronNetwork | null = null;
@@ -18,6 +19,54 @@ export function getTronWeb(network: TronNetwork, apiKey?: string): InstanceType<
   currentNetwork = network;
   currentApiKey = key;
   return tronWebInstance;
+}
+
+// triggerConstantContract goes through tronweb's resultManager which throws on
+// any chain-level `result.message` (including the literal "REVERT opcode
+// executed" returned for any Solidity revert), discarding `constant_result` —
+// the very field that holds the actual revert payload. We bypass it by
+// reusing tronweb's private `_getTriggerSmartContractArgs` to build the body
+// and posting to /wallet/triggerconstantcontract directly, so callers can
+// inspect the raw response (constant_result included) themselves.
+export interface TriggerConstantResult {
+  result?: { result?: boolean; code?: string; message?: string };
+  constant_result?: string[];
+  energy_used?: number;
+  transaction?: unknown;
+}
+
+export async function triggerConstantRaw(
+  tronWeb: InstanceType<typeof TronWeb>,
+  contract: string,
+  funcSig: string,
+  options: {
+    callValue?: number;
+    funcABIV2?: AbiFragment;
+    parametersV2?: unknown[];
+  },
+  parameters: Array<{ type: string; value: unknown }>,
+  from: string,
+): Promise<TriggerConstantResult> {
+  const opts = { ...options, _isConstant: true };
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const tb = tronWeb.transactionBuilder as any;
+  const body = tb._getTriggerSmartContractArgs(
+    contract,
+    funcSig,
+    opts,
+    parameters,
+    from,
+    undefined,             // tokenValue
+    undefined,             // tokenId
+    options.callValue ?? 0,
+    0,                     // feeLimit (ignored when _isConstant)
+  );
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return (tronWeb.fullNode as any).request(
+    'wallet/triggerconstantcontract',
+    body,
+    'post',
+  ) as Promise<TriggerConstantResult>;
 }
 
 export function sunToTrx(sun: number): string {
@@ -43,15 +92,15 @@ export function validateTokenId(value: string): void {
  * Convert TRX string to sun using string-based math to avoid floating point loss.
  * TRX has 6 decimal places (1 TRX = 1,000,000 sun).
  */
-export function trxToSun(trx: string, label = 'TRX amount'): number {
+export function trxToSun(trx: string, label = 'TRX amount', opts: { allowZero?: boolean } = {}): number {
   // Validate input format
   if (!/^\d+(\.\d+)?$/.test(trx)) {
     throw new Error(`Invalid ${label}: "${trx}". Must be a non-negative number`);
   }
   const raw = parseAmount(trx, 6);
   const val = Number(raw);
-  if (val <= 0) {
-    throw new Error(`${label} must be greater than 0`);
+  if (opts.allowZero ? val < 0 : val <= 0) {
+    throw new Error(`${label} must be ${opts.allowZero ? 'non-negative' : 'greater than 0'}`);
   }
   if (!Number.isSafeInteger(val)) {
     throw new Error(`${label} too large: "${trx}"`);
@@ -166,7 +215,16 @@ export class ContractNotFoundError extends Error {
  * Fetch TRC10 token decimals (precision) from chain.
  */
 export async function fetchTrc10Decimals(tronWeb: InstanceType<typeof TronWeb>, tokenId: string, network: TronNetwork): Promise<{ decimals: number; name?: string }> {
-  const tokenInfo = await tronWeb.trx.getTokenByID(tokenId);
+  let tokenInfo;
+  try {
+    tokenInfo = await tronWeb.trx.getTokenByID(tokenId);
+  } catch (err) {
+    // TronWeb throws "Token does not exist" for unknown TRC10 ids; normalize to our typed error.
+    if (err instanceof Error && /does not exist/i.test(err.message)) {
+      throw new TokenNotFoundError(tokenId, network);
+    }
+    throw err;
+  }
   if (!tokenInfo || tokenInfo.precision === undefined) {
     throw new TokenNotFoundError(tokenId, network);
   }
